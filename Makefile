@@ -1,5 +1,5 @@
 PROJECT := f2c23t_hello
-VERSION ?= v2026.07.2
+VERSION ?= v2026.10.1
 BUILD_ROOT ?= build
 BUILD ?= $(BUILD_ROOT)
 DIST ?= dist
@@ -70,7 +70,8 @@ HOST_TEST_LINK := -Wl,-dead_strip
 else
 HOST_TEST_LINK := -Wl,--gc-sections -lm
 endif
-HOST_TEST_BINS := $(BUILD_ROOT)/tests/scope_window-old $(BUILD_ROOT)/tests/scope_window-hw4 \
+HOST_TEST_BINS := $(BUILD_ROOT)/tests/dmm-old $(BUILD_ROOT)/tests/dmm-hw4 \
+                  $(BUILD_ROOT)/tests/scope_window-old $(BUILD_ROOT)/tests/scope_window-hw4 \
                   $(BUILD_ROOT)/tests/scope_measurements-old $(BUILD_ROOT)/tests/scope_measurements-hw4 \
                   $(BUILD_ROOT)/tests/fft \
                   $(BUILD_ROOT)/tests/generator-old $(BUILD_ROOT)/tests/generator-hw4 \
@@ -81,6 +82,8 @@ HOST_TEST_BINS := $(BUILD_ROOT)/tests/scope_window-old $(BUILD_ROOT)/tests/scope
 all: $(BUILD)/$(PROJECT).bin
 
 test: $(HOST_TEST_BINS)
+	$(BUILD_ROOT)/tests/dmm-old
+	$(BUILD_ROOT)/tests/dmm-hw4
 	$(BUILD_ROOT)/tests/scope_window-old
 	$(BUILD_ROOT)/tests/scope_window-hw4
 	$(BUILD_ROOT)/tests/scope_measurements-old
@@ -98,6 +101,10 @@ $(BUILD_ROOT)/tests/generator-old $(BUILD_ROOT)/tests/generator-hw4: tests/gener
 $(BUILD_ROOT)/tests/fpga_timing-old $(BUILD_ROOT)/tests/fpga_timing-hw4: tests/fpga_timing.c src/fpga.c src/fpga.h src/hw.h
 	@mkdir -p $(dir $@)
 	$(CLANG) $(HOST_TEST_FLAGS) -DHW_TARGET_HW40=$(if $(filter %-hw4,$@),1,0) $< $(HOST_TEST_LINK) -o $@
+
+$(BUILD_ROOT)/tests/dmm-old $(BUILD_ROOT)/tests/dmm-hw4: tests/dmm.c src/dmm.c src/dmm.h src/ui.c src/settings.h src/hw.h Makefile
+	@mkdir -p $(dir $@)
+	$(CLANG) $(HOST_TEST_FLAGS) -DHW_TARGET_HW40=$(if $(filter %-hw4,$@),1,0) -DEXPECTED_FW_VERSION='"$(VERSION)"' $< $(HOST_TEST_LINK) -o $@
 
 $(BUILD_ROOT)/tests/%-old: tests/%.c src/ui.c src/settings.h src/fft.h
 	@mkdir -p $(dir $@)

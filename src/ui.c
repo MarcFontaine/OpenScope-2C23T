@@ -35,7 +35,7 @@
 #define GEN_FREQ_UNIT_COUNT 3u
 #define GEN_DUTY_EDIT_DIGITS 3u
 #define GEN_AMP_EDIT_DIGITS 2u
-#define FIRMWARE_VERSION_TEXT "v2026.07.2"
+#define FIRMWARE_VERSION_TEXT "v2026.10.1"
 #ifndef SCOPE_UI_SAFE_STUB
 #define SCOPE_UI_SAFE_STUB 1
 #endif
@@ -391,11 +391,11 @@ typedef struct {
     uint8_t hide_traces;
 } bode_saved_state_t;
 static bode_saved_state_t bode_saved;
-static int32_t dmm_rel_ref_milli;
+static int32_t dmm_rel_ref_fixed;
 static char dmm_hold_value[10];
 static char dmm_hold_unit[6];
 static char dmm_rel_unit[6];
-static char dmm_rel_value[10];
+static char dmm_rel_value[12];
 static char dmm_rel_ref_value[10];
 static char dmm_low_current_value[10];
 static char dmm_status_detail[18];
@@ -3590,7 +3590,7 @@ static uint8_t ui_text_equal(const char *a, const char *b) {
     return *a == *b;
 }
 
-static void format_signed_milli(int32_t value, char out[10]) {
+static void format_signed_fixed(int32_t value, char out[12]) {
     uint8_t pos = 0;
     uint32_t abs_value;
     uint32_t whole;
@@ -3603,8 +3603,8 @@ static void format_signed_milli(int32_t value, char out[10]) {
         abs_value = (uint32_t)value;
     }
 
-    whole = abs_value / 1000u;
-    frac = (uint16_t)(abs_value % 1000u);
+    whole = abs_value / DMM_VALUE_SCALE;
+    frac = (uint16_t)(abs_value % DMM_VALUE_SCALE);
     if (whole > 9999u) {
         ui_text_copy(out, value < 0 ? "-OVER" : "OVER", 10);
         return;
@@ -3621,7 +3621,8 @@ static void format_signed_milli(int32_t value, char out[10]) {
     }
     out[pos++] = (char)('0' + whole % 10u);
     out[pos++] = '.';
-    out[pos++] = (char)('0' + frac / 100u);
+    out[pos++] = (char)('0' + frac / 1000u);
+    out[pos++] = (char)('0' + (frac / 100u) % 10u);
     out[pos++] = (char)('0' + (frac / 10u) % 10u);
     out[pos++] = (char)('0' + frac % 10u);
     out[pos] = 0;
@@ -3838,7 +3839,7 @@ static const char *dmm_live_display_value(void) {
 
 static const char *dmm_live_display_unit(void) {
     if (ui.dmm_mode == DMM_MODE_AUTO) {
-        return dmm_has_reading() ? dmm_unit_text() : "";
+        return dmm_has_reading() && !ui_text_equal(dmm_value_text(), "AUTO") ? dmm_unit_text() : "";
     }
     if (dmm_live_open_display()) {
         return "";
@@ -3848,9 +3849,6 @@ static const char *dmm_live_display_unit(void) {
     }
     if (ui.dmm_mode == DMM_MODE_LIVE) {
         return "";
-    }
-    if (dmm_low_current_mode()) {
-        return "MA";
     }
     return dmm_mode_uses_real_reading() ? dmm_unit_text() : dmm_units[ui.dmm_mode];
 }
@@ -3865,7 +3863,7 @@ static const char *dmm_rel_display_value(void) {
         return "RANGE";
     }
 
-    format_signed_milli((int32_t)(dmm_value_milli_units() - dmm_rel_ref_milli), dmm_rel_value);
+    format_signed_fixed((int32_t)(dmm_value_fixed_units() - dmm_rel_ref_fixed), dmm_rel_value);
     return dmm_rel_value;
 }
 
@@ -8040,10 +8038,10 @@ static void dmm_toggle_relative(void) {
     }
 
     dmm_hold_active = 0;
-    dmm_rel_ref_milli = dmm_value_milli_units();
+    dmm_rel_ref_fixed = dmm_value_fixed_units();
     ui_text_copy(dmm_rel_ref_value, dmm_live_display_value(), sizeof(dmm_rel_ref_value));
     ui_text_copy(dmm_rel_unit, dmm_live_display_unit(), sizeof(dmm_rel_unit));
-    format_signed_milli(0, dmm_rel_value);
+    format_signed_fixed(0, dmm_rel_value);
     dmm_rel_active = 1;
     dmm_stats_reset();
 }

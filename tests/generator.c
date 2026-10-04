@@ -69,6 +69,7 @@ const char *arb_file_name(uint8_t index) { (void)index; return "test"; }
 uint8_t dmm_has_reading(void) { return 0; }
 uint8_t dmm_value_is_numeric(void) { return 0; }
 int32_t dmm_value_milli_units(void) { return 0; }
+int32_t dmm_value_fixed_units(void) { return 0; }
 const char *dmm_value_text(void) { return ""; }
 const char *dmm_unit_text(void) { return ""; }
 const char *dmm_status_text(void) { return ""; }

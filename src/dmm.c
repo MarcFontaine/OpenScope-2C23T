@@ -9,11 +9,13 @@ enum {
     USART_STS_FE = 1u << 1,
     USART_STS_NE = 1u << 2,
     USART_STS_ORE = 1u << 3,
+    USART_STS_IDLE = 1u << 4,
     USART_STS_RXNE = 1u << 5,
     USART_STS_TXE = 1u << 7,
 
     USART_CTRL1_RE = 1u << 2,
     USART_CTRL1_TE = 1u << 3,
+    USART_CTRL1_IDLEIE = 1u << 4,
     USART_CTRL1_RXNEIE = 1u << 5,
     USART_CTRL1_UE = 1u << 13,
 
@@ -70,7 +72,7 @@ static uint8_t dmm_baud_locked;
 static uint16_t dmm_retry_ms;
 static uint16_t dmm_settle_ms;
 static uint16_t dmm_detected_brr;
-static int32_t dmm_value_milli;
+static int32_t dmm_value_fixed;
 static char dmm_value[10] = "----";
 static char dmm_unit[6] = "V";
 static char dmm_status[9] = "B0 RX00";
@@ -157,7 +159,7 @@ static void dmm_uart_apply_brr(uint16_t brr) {
     USART_BAUDR(USART3_BASE) = brr;
     (void)USART_STS(USART3_BASE);
     (void)USART_DT(USART3_BASE);
-    USART_CTRL1(USART3_BASE) = USART_CTRL1_UE | USART_CTRL1_RXNEIE | USART_CTRL1_TE | USART_CTRL1_RE;
+    USART_CTRL1(USART3_BASE) = USART_CTRL1_UE | USART_CTRL1_RXNEIE | USART_CTRL1_IDLEIE | USART_CTRL1_TE | USART_CTRL1_RE;
 }
 
 static void dmm_uart_apply_ctrl3(void) {
@@ -214,7 +216,7 @@ static uint8_t text_equal(const char *a, const char *b) {
     return *a == *b;
 }
 
-static uint8_t parse_milli_units(const char *text, int32_t *value) {
+static uint8_t parse_fixed_units(const char *text, int32_t *value) {
     uint8_t negative = 0;
     uint8_t seen_dot = 0;
     uint8_t digits = 0;
@@ -234,7 +236,7 @@ static uint8_t parse_milli_units(const char *text, int32_t *value) {
             uint8_t digit = (uint8_t)(*text - '0');
             ++digits;
             if (seen_dot) {
-                if (frac_digits < 3u) {
+                if (frac_digits < 4u) {
                     frac = frac * 10 + digit;
                     ++frac_digits;
                 } else if (!round_checked) {
@@ -256,19 +258,19 @@ static uint8_t parse_milli_units(const char *text, int32_t *value) {
         return 0;
     }
 
-    while (frac_digits < 3u) {
+    while (frac_digits < 4u) {
         frac *= 10;
         ++frac_digits;
     }
     if (round_up) {
         ++frac;
-        if (frac >= 1000) {
+        if (frac >= DMM_VALUE_SCALE) {
             ++whole;
             frac = 0;
         }
     }
 
-    *value = whole * 1000 + frac;
+    *value = whole * DMM_VALUE_SCALE + frac;
     if (negative) {
         *value = -*value;
     }
@@ -323,7 +325,7 @@ static void default_value_for_mode(uint8_t mode, char out[10]) {
     } else if (mode == 8u) {
         text_copy(out, "0000", 10);
     } else if (mode == 12u) {
-        text_copy(out, "0000", 10);
+        text_copy(out, "0.0000", 10);
     } else {
         text_copy(out, "0.000", 10);
     }
@@ -339,47 +341,6 @@ static uint8_t mode_is_high_current(void) {
 
 static uint8_t mode_is_low_current(void) {
     return dmm_current_mode == 11u || dmm_current_mode == 12u;
-}
-
-static void format_implicit_decimal_value(const char digits[5], uint8_t frac_digits, uint8_t negative, char out[10]) {
-    char scaled[12];
-    uint8_t pos = 0;
-    uint8_t src = 0;
-    uint8_t integer_digits;
-
-    if (frac_digits > 4u) {
-        frac_digits = 4u;
-    }
-    integer_digits = (uint8_t)(4u - frac_digits);
-
-    if (negative) {
-        scaled[pos++] = '-';
-    }
-    if (!integer_digits) {
-        scaled[pos++] = '0';
-    } else {
-        for (; src < integer_digits && pos < (uint8_t)(sizeof(scaled) - 1u); ++src) {
-            scaled[pos++] = digits[src];
-        }
-    }
-    if (frac_digits && pos < (uint8_t)(sizeof(scaled) - 1u)) {
-        scaled[pos++] = '.';
-        for (; src < 4u && pos < (uint8_t)(sizeof(scaled) - 1u); ++src) {
-            scaled[pos++] = digits[src];
-        }
-    }
-    scaled[pos] = 0;
-
-    pos = negative ? 1u : 0u;
-    while (scaled[pos] == '0' && scaled[pos + 1u] && scaled[pos + 1u] != '.') {
-        ++pos;
-    }
-    if (negative) {
-        out[0] = '-';
-        text_copy(&out[1], &scaled[pos], 9);
-    } else {
-        text_copy(out, &scaled[pos], 10);
-    }
 }
 
 static void format_unit(uint8_t flags_a, uint8_t flags_b, uint8_t flags_c, char out[6]) {
@@ -437,35 +398,17 @@ static void format_unit(uint8_t flags_a, uint8_t flags_b, uint8_t flags_c, char 
             text_copy(out, "V", 6);
         }
     } else if (kind == 'A') {
-        if (mode_is_high_current()) {
-            text_copy(out, "A", 6);
-        } else if (mode_is_low_current()) {
-            text_copy(out, "MA", 6);
-        } else if (prefix == 'm') {
+        if (prefix == 'm') {
             text_copy(out, "MA", 6);
         } else if (prefix == 'U') {
             text_copy(out, "UA", 6);
         } else {
             text_copy(out, "A", 6);
         }
-    } else if (kind == 'C') {
+    } else if (kind == 'C' || kind == 'D') {
         text_copy(out, "DEG", 6);
-    } else if (kind == 'D') {
-        text_copy(out, "V", 6);
     } else {
-        default_unit_for_mode(dmm_current_mode, out);
-    }
-}
-
-static void normalize_current_reading(char value[10], char unit[6], int32_t *milli_units) {
-    if (mode_is_high_current()) {
-        (void)value;
-        (void)milli_units;
-        text_copy(unit, "A", 6);
-    } else if (mode_is_low_current()) {
-        (void)value;
-        (void)milli_units;
-        text_copy(unit, "MA", 6);
+        text_copy(out, "", 6);
     }
 }
 
@@ -509,7 +452,7 @@ static void dmm_apply_missing_uart_fallback(void) {
     char wire_unit[6];
     char new_value[10];
     char new_unit[6];
-    int32_t new_milli = 0;
+    int32_t new_fixed = 0;
     uint8_t new_numeric;
 
     default_value_for_mode(dmm_current_mode, wire_value);
@@ -521,30 +464,17 @@ static void dmm_apply_missing_uart_fallback(void) {
         if (text_has_char(new_value, '.')) {
             text_copy(new_value, "OPEN", sizeof(new_value));
         } else if (text_alpha_count(new_value) == 1u) {
-            text_copy(new_value, "0.0", sizeof(new_value));
+            text_copy(new_value, "OPEN", sizeof(new_value));
         }
-    } else if (mode_is_low_current() && !text_has_char(new_value, '.')) {
-        char digits[5] = "0000";
-        uint8_t idx = 0;
-
-        for (uint8_t i = 0; new_value[i] && idx < 4u; ++i) {
-            if (char_is_digit(new_value[i])) {
-                digits[idx++] = new_value[i];
-            }
-        }
-        format_implicit_decimal_value(digits, 4u, 0, new_value);
     } else {
         normalize_plain_numeric_text(new_value);
     }
 
-    new_numeric = parse_milli_units(new_value, &new_milli);
-    if (new_numeric) {
-        normalize_current_reading(new_value, new_unit, &new_milli);
-    }
+    new_numeric = parse_fixed_units(new_value, &new_fixed);
     text_copy(dmm_value, new_value, sizeof(dmm_value));
     text_copy(dmm_unit, new_unit, sizeof(dmm_unit));
     dmm_numeric_valid = new_numeric;
-    dmm_value_milli = new_milli;
+    dmm_value_fixed = new_fixed;
     dmm_valid = 1;
     dmm_synthetic_valid = 1;
 }
@@ -565,63 +495,41 @@ static uint8_t reading_uses_one_decimal_minimum(const char *unit) {
     return mode_uses_one_decimal_minimum() || unit_is_resistance(unit);
 }
 
-static uint8_t reading_implicit_fraction_digits(const char *unit, uint8_t digit_count) {
-    if (unit_is_current(unit) && digit_count == 4u) {
-        return 4u;
-    }
-    if (unit_is_resistance(unit)) {
-        return digit_count > 0u ? 1u : 0u;
-    }
-    if ((dmm_current_mode == 1u || dmm_current_mode == 2u) &&
-        text_equal(unit, "V") &&
-        digit_count == 4u) {
-        return 1u;
-    }
-    return 0;
-}
-
-static uint8_t voltage_leading_dot_is_negative_marker(const char *unit, const uint8_t segments[4]) {
-    return (dmm_current_mode == 1u || (dmm_current_mode == 0u && unit_is_voltage(unit))) &&
-           unit_is_voltage(unit) &&
-           (segments[0] & 0x10u);
-}
-
 static uint8_t unit_is_capacitance(const char *unit) {
     return text_equal(unit, "F") || text_equal(unit, "NF") ||
            text_equal(unit, "UF") || text_equal(unit, "MF");
 }
 
 static uint8_t dmm_reading_compatible(const char *value, const char *unit, uint8_t numeric) {
-    if (dmm_current_mode == 0u) {
-        return 1;
-    }
     if (!numeric && text_equal(value, "OPEN")) {
-        return 1;
+        return dmm_current_mode != 6u && dmm_current_mode != 8u;
     }
-    if (!numeric && text_equal(value, "O.L")) {
-        return dmm_current_mode == 3u || dmm_current_mode == 4u || dmm_current_mode == 5u;
+    if (dmm_current_mode == 0u) {
+        return numeric ? unit[0] != 0 : text_equal(value, "AUTO");
     }
-
+    if (dmm_current_mode == 6u) {
+        return text_equal(value, "L1UE") || text_equal(value, "00L0") || (!unit[0] && numeric);
+    }
+    if (!numeric) {
+        return 0;
+    }
     if (dmm_current_mode == 1u || dmm_current_mode == 2u) {
         return unit_is_voltage(unit);
     }
-    if (dmm_current_mode == 3u || dmm_current_mode == 4u || dmm_current_mode == 7u) {
-        return 1;
+    if (dmm_current_mode == 3u || dmm_current_mode == 7u) {
+        return unit_is_resistance(unit);
+    }
+    if (dmm_current_mode == 4u) {
+        return unit_is_voltage(unit) || unit_is_resistance(unit);
     }
     if (dmm_current_mode == 5u) {
         return unit_is_capacitance(unit);
     }
-    if (dmm_current_mode == 6u) {
-        return text_equal(unit, "") || text_equal(value, "L1UE") || text_equal(value, "LIVE");
-    }
     if (dmm_current_mode == 8u) {
         return text_equal(unit, "DEG");
     }
-    if (mode_is_high_current()) {
-        return text_equal(unit, "A");
-    }
-    if (mode_is_low_current()) {
-        return text_equal(unit, "MA");
+    if (mode_is_high_current() || mode_is_low_current()) {
+        return unit_is_current(unit);
     }
     return 1;
 }
@@ -635,9 +543,8 @@ static uint8_t format_value(const uint8_t frame[DMM_FRAME_LEN], const char *unit
     uint8_t alpha_count = 0;
     uint8_t has_l = 0;
     uint8_t has_dot = 0;
-    uint8_t negative = frame[2] & 0x01u;
+    uint8_t negative;
     uint8_t all_zero = 1;
-    uint8_t implicit_frac_digits = 0;
     int8_t dot_index = -1;
 
     segments[0] = (uint8_t)((frame[2] & 0xF0u) | (frame[3] & 0x0Fu));
@@ -645,19 +552,15 @@ static uint8_t format_value(const uint8_t frame[DMM_FRAME_LEN], const char *unit
     segments[2] = (uint8_t)((frame[4] & 0xF0u) | (frame[5] & 0x0Fu));
     segments[3] = (uint8_t)((frame[5] & 0xF0u) | (frame[6] & 0x0Fu));
 
-    uint8_t leading_dot_negative = voltage_leading_dot_is_negative_marker(unit, segments);
-
-    for (uint8_t i = 0; i < 3u; ++i) {
-        if (leading_dot_negative && i == 0u) {
-            continue;
-        }
+    // The first digit's 0x10 bit draws a minus; the other three bits draw decimal points.
+    negative = (segments[0] & 0x10u) != 0;
+    for (uint8_t i = 1; i < 4u; ++i) {
         if (segments[i] & 0x10u) {
+            if (dot_index >= 0) {
+                return 0;
+            }
             dot_index = (int8_t)i;
         }
-    }
-    if (leading_dot_negative) {
-        negative = 1;
-        segments[0] = (uint8_t)(segments[0] & 0xEFu);
     }
     has_dot = dot_index >= 0 ? 1u : 0u;
 
@@ -680,46 +583,19 @@ static uint8_t format_value(const uint8_t frame[DMM_FRAME_LEN], const char *unit
     }
     digits[4] = 0;
 
-    if (dmm_current_mode == 8u && has_l) {
-        return 0;
-    }
-
     if (has_alpha) {
-        if (has_l && has_dot) {
+        if (has_l && alpha_count == 1u && dmm_current_mode != 6u) {
             text_copy(out, "OPEN", 10);
-            return 1;
-        }
-        if (has_l && alpha_count == 1u) {
-            text_copy(out, "0.0", 10);
             return 1;
         }
         text_copy(out, digits, 10);
         return 1;
     }
 
-    if (!has_dot) {
-        implicit_frac_digits = reading_implicit_fraction_digits(unit, 4u);
-        if (implicit_frac_digits && mode_is_high_current() && digits[0] != '0') {
-            implicit_frac_digits = 2u;
-        }
-        if (implicit_frac_digits) {
-            format_implicit_decimal_value(digits, implicit_frac_digits, negative, out);
-            return 1;
-        }
-    }
-
     if (all_zero) {
         negative = 0;
-        if (dot_index < 0) {
-            if (dmm_current_mode == 8u) {
-                text_copy(out, "0", 10);
-                return 1;
-            }
-            if (reading_uses_one_decimal_minimum(unit)) {
-                text_copy(out, "0.0", 10);
-                return 1;
-            }
-            default_value_for_mode(dmm_current_mode, out);
+        if (dmm_current_mode == 6u) {
+            text_copy(out, "L1UE", 10);
             return 1;
         }
     }
@@ -746,16 +622,7 @@ static uint8_t format_value(const uint8_t frame[DMM_FRAME_LEN], const char *unit
     }
 
     uint8_t out_len = 0;
-    uint8_t remaining_digits = 0;
     uint8_t output_has_dot = has_dot;
-
-    if (!has_dot) {
-        for (uint8_t i = start; raw[i]; ++i) {
-            if (char_is_digit(raw[i])) {
-                ++remaining_digits;
-            }
-        }
-    }
 
     if (negative && out_len < 9u) {
         out[out_len++] = '-';
@@ -764,9 +631,6 @@ static uint8_t format_value(const uint8_t frame[DMM_FRAME_LEN], const char *unit
         out[out_len++] = '0';
     }
     while (raw[start] && out_len < 9u) {
-        if (char_is_digit(raw[start]) && remaining_digits) {
-            --remaining_digits;
-        }
         out[out_len++] = raw[start++];
     }
     if (reading_uses_one_decimal_minimum(unit) && !output_has_dot && out_len < 8u) {
@@ -780,28 +644,28 @@ static uint8_t format_value(const uint8_t frame[DMM_FRAME_LEN], const char *unit
 static uint8_t parse_frame(const uint8_t frame[DMM_FRAME_LEN]) {
     char new_value[10];
     char new_unit[6];
-    int32_t new_milli = 0;
+    int32_t new_fixed = 0;
     uint8_t new_numeric;
     uint8_t changed;
 
     if (frame[0] != 0x5Au || frame[1] != 0xA5u) {
         return 0;
     }
-    dmm_baud_locked = 1;
-
     format_unit(frame[6], frame[7], frame[8], new_unit);
     if (!format_value(frame, new_unit, new_value)) {
         return 0;
     }
-    new_numeric = parse_milli_units(new_value, &new_milli);
+    new_numeric = parse_fixed_units(new_value, &new_fixed);
     if (new_numeric) {
-        normalize_current_reading(new_value, new_unit, &new_milli);
+        if (!new_unit[0] && dmm_current_mode != 6u) {
+            return 0;
+        }
+    } else if (!text_equal(new_value, "AUTO") && !text_equal(new_value, "OPEN") &&
+               !text_equal(new_value, "L1UE") && !text_equal(new_value, "00L0")) {
+        return 0;
     }
-    if (dmm_current_mode == 3u && !unit_is_resistance(new_unit)) {
-        text_copy(new_unit, "OHM", sizeof(new_unit));
-    } else if (dmm_current_mode == 4u && !unit_is_voltage(new_unit) && !unit_is_resistance(new_unit)) {
-        text_copy(new_unit, "V", sizeof(new_unit));
-    }
+    // A well-formed old-mode packet still confirms the UART clock, but must not change the display.
+    dmm_baud_locked = 1;
     if (!dmm_reading_compatible(new_value, new_unit, new_numeric)) {
         return 0;
     }
@@ -810,7 +674,7 @@ static uint8_t parse_frame(const uint8_t frame[DMM_FRAME_LEN]) {
     text_copy(dmm_value, new_value, sizeof(dmm_value));
     text_copy(dmm_unit, new_unit, sizeof(dmm_unit));
     dmm_numeric_valid = new_numeric;
-    dmm_value_milli = new_milli;
+    dmm_value_fixed = new_fixed;
     dmm_valid = 1;
     dmm_synthetic_valid = 0;
     return changed;
@@ -931,7 +795,7 @@ void dmm_reenter(uint8_t mode_index) {
     dmm_valid = 0;
     dmm_synthetic_valid = 0;
     dmm_numeric_valid = 0;
-    dmm_value_milli = 0;
+    dmm_value_fixed = 0;
     default_value_for_mode(mode_index, dmm_value);
     default_unit_for_mode(mode_index, dmm_unit);
     dmm_rx_reset_counters();
@@ -945,7 +809,7 @@ void dmm_reenter(uint8_t mode_index) {
 
     dmm_uart_apply_ctrl3();
 #if HW_TARGET_HW40
-    USART_CTRL1(USART3_BASE) |= USART_CTRL1_UE | USART_CTRL1_RXNEIE | USART_CTRL1_TE | USART_CTRL1_RE;
+    USART_CTRL1(USART3_BASE) |= USART_CTRL1_UE | USART_CTRL1_RXNEIE | USART_CTRL1_IDLEIE | USART_CTRL1_TE | USART_CTRL1_RE;
 #else
     dmm_uart_apply_brr(dmm_current_brr());
 #endif
@@ -998,7 +862,7 @@ void dmm_set_mode(uint8_t mode_index) {
     dmm_valid = 0;
     dmm_synthetic_valid = 0;
     dmm_numeric_valid = 0;
-    dmm_value_milli = 0;
+    dmm_value_fixed = 0;
     default_value_for_mode(mode_index, dmm_value);
     default_unit_for_mode(mode_index, dmm_unit);
     dmm_rx_reset_counters();
@@ -1078,7 +942,11 @@ uint8_t dmm_value_is_numeric(void) {
 }
 
 int32_t dmm_value_milli_units(void) {
-    return dmm_value_milli;
+    return dmm_value_fixed < 0 ? -((-dmm_value_fixed + 5) / 10) : (dmm_value_fixed + 5) / 10;
+}
+
+int32_t dmm_value_fixed_units(void) {
+    return dmm_value_fixed;
 }
 
 const char *dmm_value_text(void) {
@@ -1108,22 +976,41 @@ uint8_t dmm_diode_continuity_active(void) {
     if (dmm_current_mode != 4u || !dmm_reading_is_real() || !dmm_numeric_valid) {
         return 0;
     }
+    int32_t value = dmm_value_fixed;
     if (unit_is_resistance(dmm_unit)) {
-        return dmm_value_milli <= 50000;
+        if (value < 0) {
+            return 0;
+        }
+        uint32_t factor = text_equal(dmm_unit, "KOHM") ? 1000u : text_equal(dmm_unit, "MOHM") ? 1000000u : 1u;
+        return (int64_t)value * factor <= 50 * DMM_VALUE_SCALE;
     }
     if (unit_is_voltage(dmm_unit)) {
-        return dmm_value_milli <= 100;
+        if (value < 0) {
+            value = -value;
+        }
+        return value <= (text_equal(dmm_unit, "MV") ? 100 * DMM_VALUE_SCALE : DMM_VALUE_SCALE / 10);
     }
     return 0;
 }
 
+static void dmm_rx_event(uint32_t status, uint8_t byte) {
+    if (status & (USART_STS_ORE | USART_STS_NE | USART_STS_FE)) {
+        rx_pos = 0;
+        return;
+    }
+    if (status & USART_STS_IDLE) {
+        rx_pos = 0;
+    }
+    if (status & USART_STS_RXNE) {
+        rx_byte(byte);
+    }
+}
+
 void dmm_uart_irq_handler(void) {
     uint32_t status = USART_STS(USART3_BASE);
-
-    if (status & USART_STS_RXNE) {
-        rx_byte((uint8_t)USART_DT(USART3_BASE));
-    } else if (status & (USART_STS_ORE | USART_STS_NE | USART_STS_FE)) {
-        (void)USART_DT(USART3_BASE);
+    if (status & (USART_STS_RXNE | USART_STS_IDLE | USART_STS_ORE | USART_STS_NE | USART_STS_FE)) {
+        uint8_t byte = (uint8_t)USART_DT(USART3_BASE);
+        dmm_rx_event(status, byte);
     }
 }
 
