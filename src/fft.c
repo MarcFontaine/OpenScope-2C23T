@@ -55,19 +55,24 @@ static float local_atan2(float y, float x) {
     return r;
 }
 
-// Newton-Raphson sqrt. appx.
 static float local_sqrt(float x) {
     if (x <= 0.0f) return 0.0f;
-    
-    // Initial rough guess
-    float guess = x;
-    if (x > 1.0f) guess = x * 0.5f;
-    
-    // Run 4 quick iterations for clean float accuracy
+    union { float value; uint32_t bits; } seed = { .value = x };
+    float scale = 1.0f;
+
+    if (seed.bits >= 0x7F800000u) return x;
+    if (seed.bits < 0x00800000u) {
+        x *= 16777216.0f;
+        seed.value = x;
+        scale = 0.000244140625f;
+    }
+    // Estimate from the exponent so four iterations also converge for large FFT bins.
+    seed.bits = (seed.bits >> 1) + 0x1FC00000u;
+    float guess = seed.value;
     for (int i = 0; i < 4; i++) {
         guess = 0.5f * (guess + x / guess);
     }
-    return guess;
+    return guess * scale;
 }
 
 // bit-reversal

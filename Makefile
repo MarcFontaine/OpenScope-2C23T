@@ -1,5 +1,5 @@
 PROJECT := f2c23t_hello
-VERSION ?= v2026.07.1
+VERSION ?= v2026.07.2
 BUILD_ROOT ?= build
 BUILD ?= $(BUILD_ROOT)
 DIST ?= dist
@@ -64,9 +64,52 @@ SRCS += src/fpga_bitstream.c
 endif
 OBJS := $(patsubst src/%.c,$(BUILD)/%.o,$(SRCS))
 
-.PHONY: all clean clean-dist release release-lt-hw4 release-hw4
+HOST_TEST_FLAGS := -std=c11 -O2 -Wall -Wextra -Werror -ffunction-sections -fdata-sections -fsanitize=address,undefined
+ifeq ($(shell uname -s),Darwin)
+HOST_TEST_LINK := -Wl,-dead_strip
+else
+HOST_TEST_LINK := -Wl,--gc-sections -lm
+endif
+HOST_TEST_BINS := $(BUILD_ROOT)/tests/scope_window-old $(BUILD_ROOT)/tests/scope_window-hw4 \
+                  $(BUILD_ROOT)/tests/scope_measurements-old $(BUILD_ROOT)/tests/scope_measurements-hw4 \
+                  $(BUILD_ROOT)/tests/fft \
+                  $(BUILD_ROOT)/tests/generator-old $(BUILD_ROOT)/tests/generator-hw4 \
+                  $(BUILD_ROOT)/tests/fpga_timing-old $(BUILD_ROOT)/tests/fpga_timing-hw4
+
+.PHONY: all clean clean-dist release release-lt-hw4 release-hw4 test
 
 all: $(BUILD)/$(PROJECT).bin
+
+test: $(HOST_TEST_BINS)
+	$(BUILD_ROOT)/tests/scope_window-old
+	$(BUILD_ROOT)/tests/scope_window-hw4
+	$(BUILD_ROOT)/tests/scope_measurements-old
+	$(BUILD_ROOT)/tests/scope_measurements-hw4
+	$(BUILD_ROOT)/tests/fft
+	$(BUILD_ROOT)/tests/generator-old
+	$(BUILD_ROOT)/tests/generator-hw4
+	$(BUILD_ROOT)/tests/fpga_timing-old
+	$(BUILD_ROOT)/tests/fpga_timing-hw4
+
+$(BUILD_ROOT)/tests/generator-old $(BUILD_ROOT)/tests/generator-hw4: tests/generator.c src/ui.c src/siggen.c src/siggen.h src/fft.c src/settings.h src/fpga.h
+	@mkdir -p $(dir $@)
+	$(CLANG) $(HOST_TEST_FLAGS) -DHW_TARGET_HW40=$(if $(filter %-hw4,$@),1,0) $< src/siggen.c src/fft.c $(HOST_TEST_LINK) -o $@
+
+$(BUILD_ROOT)/tests/fpga_timing-old $(BUILD_ROOT)/tests/fpga_timing-hw4: tests/fpga_timing.c src/fpga.c src/fpga.h src/hw.h
+	@mkdir -p $(dir $@)
+	$(CLANG) $(HOST_TEST_FLAGS) -DHW_TARGET_HW40=$(if $(filter %-hw4,$@),1,0) $< $(HOST_TEST_LINK) -o $@
+
+$(BUILD_ROOT)/tests/%-old: tests/%.c src/ui.c src/settings.h src/fft.h
+	@mkdir -p $(dir $@)
+	$(CLANG) $(HOST_TEST_FLAGS) -DHW_TARGET_HW40=0 $< $(HOST_TEST_LINK) -o $@
+
+$(BUILD_ROOT)/tests/%-hw4: tests/%.c src/ui.c src/settings.h src/fft.h
+	@mkdir -p $(dir $@)
+	$(CLANG) $(HOST_TEST_FLAGS) -DHW_TARGET_HW40=1 $< $(HOST_TEST_LINK) -o $@
+
+$(BUILD_ROOT)/tests/fft: tests/fft.c src/fft.c src/fft.h
+	@mkdir -p $(dir $@)
+	$(CLANG) $(HOST_TEST_FLAGS) $< $(HOST_TEST_LINK) -o $@
 
 $(LLD_DIR)/ld.lld:
 	@test -n "$(RUST_LLD)" || (echo "rust-lld not found; install an ARM linker or Rust toolchain with rust-lld" >&2; exit 1)

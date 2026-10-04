@@ -274,7 +274,7 @@ void siggen_configure(uint8_t enabled, uint8_t wave, uint32_t freq_hz, uint8_t d
         delay_ms(SIGGEN_BUFFER_SETTLE_MS);
     }
     if (timing_dirty) {
-        fpga_write_timing(tuning_word_for(enabled ? freq_hz : 0u), FPGA_SAMPLE_COUNT);
+        fpga_write_generator_timing(tuning_word_for(enabled ? freq_hz : 0u));
         delay_ms(SIGGEN_TIMING_SETTLE_MS);
     }
     if (buffer_dirty) {
@@ -288,6 +288,15 @@ void siggen_configure(uint8_t enabled, uint8_t wave, uint32_t freq_hz, uint8_t d
     last_freq_hz = freq_hz;
     last_duty_percent = duty_percent;
     last_amplitude_tenths_v = amplitude_tenths_v;
+}
+
+void siggen_set_frequency(uint32_t freq_hz) {
+    if (last_enabled != 1u || freq_hz == last_freq_hz) {
+        return;
+    }
+    fpga_write_generator_timing(tuning_word_for(freq_hz));
+    delay_ms(SIGGEN_TIMING_SETTLE_MS);
+    last_freq_hz = freq_hz;
 }
 
 void siggen_set_arb_waveform(const uint8_t *samples, uint16_t count) {

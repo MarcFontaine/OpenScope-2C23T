@@ -23,7 +23,7 @@ enum {
 static uint8_t fpga_ready_flag;
 static uint8_t fpga_loaded;
 static uint32_t fpga_last_tuning_word;
-static uint32_t fpga_last_span;
+static uint32_t fpga_last_span = FPGA_SAMPLE_COUNT;
 
 static void fpga_start_clock_output(void) {
 #if HW_TARGET_HW40
@@ -34,6 +34,10 @@ static void fpga_start_clock_output(void) {
     RCC_CFGR = (RCC_CFGR & ~(7u << 24)) | (4u << 24);
     RCC_CFGR2 = (RCC_CFGR2 & ~((1u << 16) | (15u << 28))) | (11u << 28);
 #endif
+}
+
+void fpga_write_generator_timing(uint32_t tuning_word) {
+    fpga_write_timing(tuning_word, fpga_last_span);
 }
 
 #if HW_TARGET_HW40

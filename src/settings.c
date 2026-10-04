@@ -318,7 +318,7 @@ static void settings_clamp(settings_state_t *settings) {
     if (settings->scope_fft_window >= 4u) {
         settings->scope_fft_window = 0u; // Default to Hann window for clean spectrums
     }
-    if (settings->scope_fft_display >= 4u) {
+    if (settings->scope_fft_display >= 3u) {
         settings->scope_fft_display = 0u; // Default to Normal real-time tracking
     }
     if (settings->scope_hide_traces >= 4u) {
@@ -368,10 +368,10 @@ static void settings_clamp(settings_state_t *settings) {
     } else if (settings->bode_stop_hz > SETTINGS_SIGGEN_MAX_FREQ_HZ) {
         settings->bode_stop_hz = SETTINGS_SIGGEN_MAX_FREQ_HZ;
     }
-    if (settings->bode_steps < 10u) {
-        settings->bode_steps = 10u;
-    } else if (settings->bode_steps > 80u) {
-        settings->bode_steps = 80u;
+    if (settings->bode_steps < SETTINGS_BODE_MIN_STEPS) {
+        settings->bode_steps = SETTINGS_BODE_MIN_STEPS;
+    } else if (settings->bode_steps > SETTINGS_BODE_MAX_STEPS) {
+        settings->bode_steps = SETTINGS_BODE_MAX_STEPS;
     }
     for (uint8_t ch = 0; ch < SETTINGS_SCOPE_CHANNEL_COUNT; ++ch) {
         settings->scope_ch_enabled[ch] = settings->scope_ch_enabled[ch] ? 1u : 0u;
