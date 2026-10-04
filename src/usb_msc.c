@@ -1,6 +1,7 @@
 #include "usb_msc.h"
 
 #include "board.h"
+#include "bootloader.h"
 #include "fw_update.h"
 #include "hw.h"
 #include "screenshot.h"
@@ -891,7 +892,8 @@ static uint8_t raw_fat_patch_entry_in_sector(const raw_fat_volume_t *fat,
     return 1;
 }
 
-static uint8_t raw_fat_link_clusters(const raw_fat_volume_t *fat, uint16_t count) {
+static uint8_t raw_fat_write_cluster_range(const raw_fat_volume_t *fat,
+                                           uint16_t start, uint16_t count, uint8_t release) {
     uint32_t eoc = fat->type == FAT_TYPE_32 ? 0x0FFFFFFFu :
         (fat->type == FAT_TYPE_16 ? 0xFFFFu : 0x0FFFu);
     uint16_t entry_width = fat->type == FAT_TYPE_32 ? 4u : 2u;
@@ -906,8 +908,9 @@ static uint8_t raw_fat_link_clusters(const raw_fat_volume_t *fat, uint16_t count
         uint8_t dirty = 0;
 
         for (uint16_t i = 0; i < count; ++i) {
-            uint32_t cluster = raw_screenshot_clusters[i];
-            uint32_t next = (i + 1u) < count ? raw_screenshot_clusters[i + 1u] : eoc;
+            uint32_t cluster = raw_screenshot_clusters[start + i];
+            uint32_t next = release ? 0 :
+                ((i + 1u) < count ? raw_screenshot_clusters[start + i + 1u] : eoc);
             uint32_t byte_addr =
                 ((fat->fat_lba + (uint32_t)copy * fat->sectors_per_fat) *
                  (uint32_t)fat->bytes_per_sector) + raw_fat_entry_offset(fat, cluster);
@@ -953,6 +956,10 @@ static uint8_t raw_fat_link_clusters(const raw_fat_volume_t *fat, uint16_t count
     raw_write_dirty = 0;
 
     return 1;
+}
+
+static uint8_t raw_fat_link_clusters(const raw_fat_volume_t *fat, uint16_t count) {
+    return raw_fat_write_cluster_range(fat, 0, count, 0);
 }
 
 static void raw_screenshot_name(uint8_t *name, uint16_t index) {
@@ -1150,6 +1157,255 @@ static uint8_t raw_fat_save_latest_screenshot(void) {
 
 uint8_t usb_msc_store_screenshot(void) {
     return raw_fat_save_latest_screenshot();
+}
+
+static uint8_t buf_equal(const uint8_t *a, const uint8_t *b, uint16_t len) {
+    while (len--) {
+        if (*a++ != *b++) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+static uint8_t raw_fat_replace_backup(const raw_fat_volume_t *fat, uint32_t addr,
+                                     const uint8_t *entry) {
+    uint32_t cluster = (uint32_t)entry[26] | ((uint32_t)entry[27] << 8);
+    uint32_t last = raw_fat_cluster_count(fat) + 1u;
+    uint16_t count = 0;
+    const uint8_t deleted = 0xE5u;
+    if (entry[11] & 0x18u) {
+        return 0;
+    }
+    if (fat->type == FAT_TYPE_32) {
+        cluster |= (uint32_t)entry[20] << 16 | (uint32_t)entry[21] << 24;
+    }
+    while (cluster && !raw_fat_cluster_is_eoc(fat, cluster)) {
+        if (cluster < 2u || cluster > last || count == SCREENSHOT_CLUSTER_COUNT) {
+            return 0;
+        }
+        raw_screenshot_clusters[count++] = cluster;
+        if (!raw_fat_next_cluster(fat, cluster, &cluster) || !cluster) {
+            return 0;
+        }
+    }
+    return raw_storage_write_bytes(addr, &deleted, 1) &&
+        (!count || raw_fat_write_cluster_range(fat, 0, count, 1));
+}
+
+static boot_export_result_t raw_fat_export_dir_sector(const raw_fat_volume_t *fat,
+                                                      uint32_t lba, uint32_t slots[2],
+                                                      uint8_t original[2], uint32_t *new_end,
+                                                      uint8_t *count, uint8_t *end) {
+    if (!raw_fat_read_sector(fat, lba, msc_root_shadow)) {
+        return BOOT_EXPORT_STORAGE_ERROR;
+    }
+    for (uint16_t off = 0; off < fat->bytes_per_sector; off += 32u) {
+        const uint8_t *entry = msc_root_shadow + off;
+        uint8_t first = entry[0];
+        if (*end && *count == 2u) {
+            *new_end = lba * (uint32_t)fat->bytes_per_sector + off;
+            return BOOT_EXPORT_OK;
+        }
+        if (!*end && first != 0 && first != 0xE5u && entry[11] != 0x0Fu &&
+            (buf_equal(entry, (const uint8_t *)BOOTLOADER_FAT_NAME, 11) ||
+             buf_equal(entry, (const uint8_t *)BOOTLOADER_FAT_INFO_NAME, 11))) {
+            if (!raw_fat_replace_backup(fat, lba * (uint32_t)fat->bytes_per_sector + off, entry)) {
+                return BOOT_EXPORT_STORAGE_ERROR;
+            }
+            first = 0xE5u;
+        }
+        if (first == 0x00u || first == 0xE5u || *end) {
+            if (first == 0x00u) {
+                *end = 1;
+            }
+            if (*count < 2u) {
+                original[*count] = *end ? 0 : first;
+                slots[(*count)++] = lba * (uint32_t)fat->bytes_per_sector + off;
+            }
+        }
+    }
+    return BOOT_EXPORT_OK;
+}
+
+static boot_export_result_t raw_fat_export_dir_slots(const raw_fat_volume_t *fat,
+                                                     uint32_t slots[2], uint8_t original[2],
+                                                     uint32_t *new_end) {
+    uint8_t count = 0;
+    uint8_t end = 0;
+    uint32_t cluster = fat->root_cluster;
+    uint32_t sector = 0;
+    uint32_t guard = 0;
+    while (fat->type == FAT_TYPE_32 ?
+           (cluster >= 2u && !raw_fat_cluster_is_eoc(fat, cluster) && guard++ < 4096u) :
+           sector < fat->root_dir_sectors) {
+        uint32_t lba = fat->type == FAT_TYPE_32 ? raw_fat_cluster_lba(fat, cluster) :
+            fat->root_lba + sector;
+        uint8_t sectors = fat->type == FAT_TYPE_32 ? fat->sectors_per_cluster : 1u;
+        for (uint8_t i = 0; i < sectors; ++i) {
+            boot_export_result_t result = raw_fat_export_dir_sector(fat, lba + i, slots,
+                                                                   original, new_end, &count, &end);
+            if (result != BOOT_EXPORT_OK) {
+                return result;
+            }
+            if (*new_end) {
+                return BOOT_EXPORT_OK;
+            }
+        }
+        ++sector;
+        if (fat->type == FAT_TYPE_32 && !raw_fat_next_cluster(fat, cluster, &cluster)) {
+            return BOOT_EXPORT_STORAGE_ERROR;
+        }
+    }
+    return count == 2u ? BOOT_EXPORT_OK : BOOT_EXPORT_NO_SPACE;
+}
+
+static boot_export_result_t raw_fat_export_data(const raw_fat_volume_t *fat,
+                                               uint16_t start, const uint8_t *data,
+                                               uint32_t size, boot_export_progress_fn_t progress) {
+    uint32_t offset = 0;
+    uint16_t index = start;
+    while (offset < size) {
+        uint32_t lba = raw_fat_cluster_lba(fat, raw_screenshot_clusters[index++]);
+        for (uint8_t s = 0; s < fat->sectors_per_cluster && offset < size; ++s) {
+            uint16_t chunk = min_u16(fat->bytes_per_sector, (uint16_t)(size - offset));
+            uint32_t addr = (lba + s) * (uint32_t)fat->bytes_per_sector;
+            buf_zero(msc_root_shadow, fat->bytes_per_sector);
+            buf_copy(msc_root_shadow, data + offset, chunk);
+            if (!raw_storage_write_bytes(addr, msc_root_shadow, fat->bytes_per_sector)) {
+                return BOOT_EXPORT_STORAGE_ERROR;
+            }
+            raw_write_loaded = 0;
+            if (!w25q_read(addr, raw_write_sector, chunk) ||
+                !buf_equal(raw_write_sector, data + offset, chunk)) {
+                return BOOT_EXPORT_VERIFY_ERROR;
+            }
+            offset += chunk;
+            if (progress) {
+                progress((uint8_t)(offset * 90u / size));
+            }
+        }
+    }
+    return BOOT_EXPORT_OK;
+}
+
+static uint8_t raw_fat_export_entry(uint32_t addr, const char name[11],
+                                   uint32_t cluster, uint32_t size) {
+    uint8_t entry[32];
+    uint8_t verify[32];
+    buf_zero(entry, sizeof(entry));
+    buf_copy(entry, (const uint8_t *)name, 11);
+    entry[11] = 0x20;
+    entry[12] = 0x18; // Lowercase short filename and extension.
+    put_le16(entry + 20, (uint16_t)(cluster >> 16));
+    put_le16(entry + 26, (uint16_t)cluster);
+    put_le32(entry + 28, size);
+    return raw_storage_write_bytes(addr, entry, sizeof(entry)) &&
+        w25q_read(addr, verify, sizeof(verify)) && buf_equal(entry, verify, sizeof(entry));
+}
+
+static void raw_fat_export_rollback(const raw_fat_volume_t *fat, uint16_t count,
+                                   const uint32_t slots[2], const uint8_t original[2]) {
+    for (uint8_t i = 0; i < 2u; ++i) {
+        (void)raw_storage_write_bytes(slots[i], original + i, 1);
+    }
+    (void)raw_fat_write_cluster_range(fat, 0, count, 1);
+}
+
+boot_export_result_t usb_msc_export_bootloader(const char *version,
+                                               boot_export_progress_fn_t progress) {
+    fw_update_status_t status;
+    raw_fat_volume_t fat;
+    uint32_t slots[2];
+    uint32_t new_end = 0;
+    uint8_t original[2];
+    char info[192];
+    uint16_t clusters;
+    uint16_t info_size;
+    uint8_t was_enabled = usb_ready;
+    boot_export_result_t result;
+
+    if (!bootloader_readable()) {
+        return BOOT_EXPORT_PROTECTED;
+    }
+    const uint8_t *source = bootloader_source();
+    if (!bootloader_vectors_valid(source)) {
+        return BOOT_EXPORT_INVALID;
+    }
+
+    // Stop USB IRQ access before checking the shared FAT buffers and detaching.
+    if (was_enabled) {
+        REG32(0xE000E180u) = 1u << 20;
+    }
+    fw_update_status(&status);
+    if (msc_state != MSC_IDLE || raw_write_failed || raw_update_scan_pending ||
+        raw_update_streaming || msc_update_candidate || status.state != FW_UPDATE_STATE_IDLE) {
+        if (was_enabled) {
+            REG32(NVIC_ISER0) = 1u << 20;
+        }
+        return BOOT_EXPORT_BUSY;
+    }
+    if (was_enabled) {
+        REG32(USB_BASE + 0x40u) |= 2u;
+        REG32(USB_BASE + 0x60u) |= 2u;
+        usb_msc_set_enabled(0);
+        delay_ms(100);
+    }
+    result = BOOT_EXPORT_STORAGE_ERROR;
+    if (!raw_write_flush()) {
+        goto done;
+    }
+    raw_write_loaded = 0;
+    if (!raw_fat_mount(&fat)) {
+        goto done;
+    }
+    result = raw_fat_export_dir_slots(&fat, slots, original, &new_end);
+    if (result != BOOT_EXPORT_OK) {
+        goto done;
+    }
+    clusters = (uint16_t)((BOOTLOADER_SIZE + fat.bytes_per_sector * fat.sectors_per_cluster - 1u) /
+                          (fat.bytes_per_sector * fat.sectors_per_cluster));
+    if (!raw_fat_find_free_clusters(&fat, (uint16_t)(clusters + 1u))) {
+        result = BOOT_EXPORT_NO_SPACE;
+        goto done;
+    }
+    if (progress) {
+        progress(0);
+    }
+    info_size = bootloader_describe(info, sizeof(info), bootloader_crc32(source, BOOTLOADER_SIZE), version);
+    if (!info_size) {
+        result = BOOT_EXPORT_STORAGE_ERROR;
+        goto done;
+    }
+    // Write and verify the data first; publish directory entries only at the end.
+    result = raw_fat_export_data(&fat, 0, source, BOOTLOADER_SIZE, progress);
+    if (result == BOOT_EXPORT_OK) {
+        result = raw_fat_export_data(&fat, clusters, (const uint8_t *)info, info_size, 0);
+    }
+    if (result != BOOT_EXPORT_OK) {
+        goto done;
+    }
+    const uint8_t zero = 0;
+    if ((new_end && !raw_storage_write_bytes(new_end, &zero, 1)) ||
+        !raw_fat_link_clusters(&fat, clusters) ||
+        !raw_fat_write_cluster_range(&fat, clusters, 1, 0) ||
+        !raw_fat_export_entry(slots[0], BOOTLOADER_FAT_NAME, raw_screenshot_clusters[0], BOOTLOADER_SIZE) ||
+        !raw_fat_export_entry(slots[1], BOOTLOADER_FAT_INFO_NAME, raw_screenshot_clusters[clusters], info_size)) {
+        raw_fat_export_rollback(&fat, (uint16_t)(clusters + 1u), slots, original);
+        result = BOOT_EXPORT_STORAGE_ERROR;
+        goto done;
+    }
+    msc_unit_attention = 1;
+    if (progress) {
+        progress(100);
+    }
+done:
+    raw_write_loaded = 0;
+    raw_write_dirty = 0;
+    if (was_enabled) {
+        usb_msc_set_enabled(1);
+    }
+    return result;
 }
 
 static void raw_fat_delete_update_file(uint32_t byte_addr) {

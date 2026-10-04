@@ -289,7 +289,7 @@ int main(void) {
     test_synthetic_readings();
     test_diode_thresholds();
     test_packet_boundaries();
-    assert(strcmp(settings_value_text(4, NULL), EXPECTED_FW_VERSION) == 0);
+    assert(strcmp(settings_value_text(SETTINGS_ROW_COUNT - 1u, NULL), EXPECTED_FW_VERSION) == 0);
     puts("DMM decoding, display, REL, continuity and UART framing tests passed");
     return 0;
 }

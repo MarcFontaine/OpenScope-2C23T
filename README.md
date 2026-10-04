@@ -31,6 +31,7 @@ In addition to the stock multimeter, oscilloscope, and signal generator function
 - **Runtime USB mass storage** while the device is running.
 - **In-app firmware update** by copying a matching `F2C23T*.bin` file to the exposed USB storage.
 - **Screenshot capture** to the device storage.
+- **Read-only bootloader export** from Settings, with hardware-specific backups and CRC32 metadata.
 - **Configurable settings** for brightness, beep volume, sleep behavior, and startup screen.
 - **Separate release binaries** for old and newer hardware revisions.
 
@@ -96,7 +97,20 @@ Run the host regression tests with Clang:
 make test
 ```
 
-These tests cover DMM decoding and UART framing, scope/FFT measurements, generator state transitions and both FPGA timing transports with mocked hardware and address/undefined-behavior sanitizers. They do not replace testing on a device.
+These tests cover DMM decoding and UART framing, scope/FFT measurements, generator state transitions, both FPGA timing transports, bootloader read protection, and FAT backup export with mocked hardware and address/undefined-behavior sanitizers. They do not replace testing on a device.
+
+## Bootloader Backup
+
+Open `Settings`, select `BOOTLOADER / EXPORT`, and press `PLAY/OK`. If USB is connected to a computer, safely eject the drive before confirming with `PLAY/OK` again; the cable can stay connected. `MENU` cancels the confirmation. The drive temporarily disconnects during export and reconnects afterwards. Ejecting avoids pending host filesystem writes; no computer or USB connection is required to create the backup.
+
+The export creates two files in the drive's root directory:
+
+- Older hardware: `boot_old.bin` (32 KiB) and `boot_old.txt`.
+- HW4.0: `boot_hw4.bin` (28 KiB) and `boot_hw4.txt`.
+
+The `.bin` contains the internal flash from `0x08000000` up to, but not including, the application start address. The `.txt` records the build target, firmware version, address, size, and CRC32 checksum. Data is read back and verified before the files are published. Exporting again replaces the existing `.bin` and `.txt` backups under the same filenames.
+
+This function never erases or programs the MCU's internal flash and never changes protection settings. It refuses protected regions or invalid bootloader vectors. It exports the bootloader currently present on the device, not the immutable MCU ROM DFU loader, and does not restore or repair it. Verification checks the copy, not the correctness of the bootloader. Use a working donor with the same hardware revision for recovery; do not flash an older-hardware bootloader onto HW4.0 without checking compatibility.
 
 ## Installation
 

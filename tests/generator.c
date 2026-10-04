@@ -13,6 +13,7 @@ static unsigned buffer_writes;
 static uint8_t output_buffer[FPGA_SAMPLE_COUNT];
 static uint8_t file_load_ok;
 static uint8_t available_files = 2;
+static unsigned boot_exports;
 
 void fpga_init_once(void) {}
 uint8_t fpga_ready(void) { return 1; }
@@ -33,6 +34,15 @@ void dmm_reenter(uint8_t mode) { (void)mode; }
 void dmm_set_mode(uint8_t mode) { (void)mode; }
 void settings_note(const settings_state_t *settings) { (void)settings; }
 void settings_flush(void) {}
+void board_buzzer_set_volume(uint8_t level) { (void)level; }
+void board_backlight_set_level(uint8_t level) { (void)level; }
+boot_export_result_t usb_msc_export_bootloader(const char *version,
+                                               boot_export_progress_fn_t progress) {
+    assert(!strcmp(version, FIRMWARE_VERSION_TEXT));
+    ++boot_exports;
+    progress(100);
+    return BOOT_EXPORT_OK;
+}
 
 void scope_hw_configure_channels(uint8_t tb, uint8_t r0, uint8_t r1,
                                  uint8_t dc0, uint8_t dc1, uint16_t dac0, uint16_t dac1) {
@@ -269,12 +279,39 @@ static void test_waveform_bounds(void) {
     siggen_set_arb_waveform(0, 0);
 }
 
+static void test_settings_export(void) {
+    ui.overlay = UI_OVERLAY_SETTINGS;
+    ui.settings_row = SETTINGS_BOOT_EXPORT_ROW;
+    ui.boot_export_state = BOOT_EXPORT_UI_NONE;
+    assert(SETTINGS_BOOT_EXPORT_ROW == SETTINGS_ROW_COUNT - 2u);
+    assert(!strcmp(settings_row_labels[SETTINGS_ROW_COUNT - 1u], "INFO"));
+    ui_handle_menu_keys(KEY_AUTO);
+    assert(ui.boot_export_state == BOOT_EXPORT_UI_NONE && !boot_exports);
+    ui_handle_menu_keys(KEY_OK);
+    assert(ui.boot_export_state == BOOT_EXPORT_UI_CONFIRM && !boot_exports);
+    ui_handle_menu_keys(KEY_OK | KEY_REPEAT);
+    assert(ui.boot_export_state == BOOT_EXPORT_UI_CONFIRM && !boot_exports);
+    ui_handle_menu_keys(KEY_MENU);
+    assert(ui.boot_export_state == BOOT_EXPORT_UI_NONE && ui.overlay == UI_OVERLAY_SETTINGS);
+    ui_handle_menu_keys(KEY_OK);
+    ui_handle_menu_keys(KEY_OK);
+    assert(boot_exports == 1 && ui.boot_export_state == BOOT_EXPORT_UI_RESULT);
+    assert(ui.boot_export_result == BOOT_EXPORT_OK && ui.boot_export_percent == 100);
+    ui_handle_menu_keys(KEY_RIGHT);
+    assert(ui.settings_row == 0 && ui.boot_export_state == BOOT_EXPORT_UI_NONE);
+    for (uint8_t i = 0; i < SETTINGS_SELECTABLE_COUNT; ++i) {
+        ui_handle_menu_keys(KEY_RIGHT);
+        assert(ui.settings_row < SETTINGS_ROW_COUNT - 1u);
+    }
+}
+
 int main(void) {
     test_mode_switches();
     test_failed_csv();
     test_deferred_uploads();
     test_bode_ownership();
     test_waveform_bounds();
+    test_settings_export();
     printf("generator: mode transitions, CSV failures, deferred uploads, Bode ownership and waveforms passed (HW4=%d)\n", HW_TARGET_HW40);
     return 0;
 }

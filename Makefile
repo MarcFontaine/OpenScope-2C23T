@@ -56,7 +56,7 @@ LDFLAGS := \
 	-Wl,--gc-sections \
 	-Wl,-Map,$(BUILD)/$(PROJECT).map
 
-SRCS := src/startup.c src/board.c src/display.c src/font.c src/dmm.c src/settings.c src/fpga.c src/scope.c src/siggen.c src/fw_update.c src/screenshot.c src/w25q.c src/usb_msc.c src/ui.c src/main.c src/fft.c src/arb_csv.c
+SRCS := src/startup.c src/board.c src/display.c src/font.c src/dmm.c src/settings.c src/fpga.c src/scope.c src/siggen.c src/fw_update.c src/screenshot.c src/w25q.c src/usb_msc.c src/bootloader.c src/ui.c src/main.c src/fft.c src/arb_csv.c
 ifeq ($(HW_TARGET_HW40),1)
 SRCS += src/fpga_bitstream_hw4.c
 else
@@ -70,7 +70,9 @@ HOST_TEST_LINK := -Wl,-dead_strip
 else
 HOST_TEST_LINK := -Wl,--gc-sections -lm
 endif
-HOST_TEST_BINS := $(BUILD_ROOT)/tests/dmm-old $(BUILD_ROOT)/tests/dmm-hw4 \
+HOST_TEST_BINS := $(BUILD_ROOT)/tests/bootloader-old $(BUILD_ROOT)/tests/bootloader-hw4 \
+                  $(BUILD_ROOT)/tests/bootloader_export-old $(BUILD_ROOT)/tests/bootloader_export-hw4 \
+                  $(BUILD_ROOT)/tests/dmm-old $(BUILD_ROOT)/tests/dmm-hw4 \
                   $(BUILD_ROOT)/tests/scope_window-old $(BUILD_ROOT)/tests/scope_window-hw4 \
                   $(BUILD_ROOT)/tests/scope_measurements-old $(BUILD_ROOT)/tests/scope_measurements-hw4 \
                   $(BUILD_ROOT)/tests/fft \
@@ -82,6 +84,10 @@ HOST_TEST_BINS := $(BUILD_ROOT)/tests/dmm-old $(BUILD_ROOT)/tests/dmm-hw4 \
 all: $(BUILD)/$(PROJECT).bin
 
 test: $(HOST_TEST_BINS)
+	$(BUILD_ROOT)/tests/bootloader-old
+	$(BUILD_ROOT)/tests/bootloader-hw4
+	$(BUILD_ROOT)/tests/bootloader_export-old
+	$(BUILD_ROOT)/tests/bootloader_export-hw4
 	$(BUILD_ROOT)/tests/dmm-old
 	$(BUILD_ROOT)/tests/dmm-hw4
 	$(BUILD_ROOT)/tests/scope_window-old
@@ -93,6 +99,14 @@ test: $(HOST_TEST_BINS)
 	$(BUILD_ROOT)/tests/generator-hw4
 	$(BUILD_ROOT)/tests/fpga_timing-old
 	$(BUILD_ROOT)/tests/fpga_timing-hw4
+
+$(BUILD_ROOT)/tests/bootloader-old $(BUILD_ROOT)/tests/bootloader-hw4: tests/bootloader.c src/bootloader.c src/bootloader.h src/app_config.h
+	@mkdir -p $(dir $@)
+	$(CLANG) $(HOST_TEST_FLAGS) -DHW_TARGET_HW40=$(if $(filter %-hw4,$@),1,0) -DAPP_BASE_ADDR=$(if $(filter %-hw4,$@),0x08007000u,0x08008000u) $< $(HOST_TEST_LINK) -o $@
+
+$(BUILD_ROOT)/tests/bootloader_export-old $(BUILD_ROOT)/tests/bootloader_export-hw4: tests/bootloader_export.c src/usb_msc.c src/usb_msc.h src/bootloader.h
+	@mkdir -p $(dir $@)
+	$(CLANG) $(HOST_TEST_FLAGS) -DHW_TARGET_HW40=$(if $(filter %-hw4,$@),1,0) -DAPP_BASE_ADDR=$(if $(filter %-hw4,$@),0x08007000u,0x08008000u) $< $(HOST_TEST_LINK) -o $@
 
 $(BUILD_ROOT)/tests/generator-old $(BUILD_ROOT)/tests/generator-hw4: tests/generator.c src/ui.c src/siggen.c src/siggen.h src/fft.c src/settings.h src/fpga.h
 	@mkdir -p $(dir $@)

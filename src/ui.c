@@ -10,6 +10,7 @@
 #include "siggen.h"
 #include "scope.h"
 #include "usb_msc.h"
+#include "bootloader.h"
 #include "fft.h"
 #include "arb_csv.h"
 
@@ -161,6 +162,7 @@ typedef struct {
     uint16_t scope_ms;
     uint16_t dmm_render_ms;
     uint16_t screenshot_overlay_ms;
+    uint16_t boot_export_overlay_ms;
     uint16_t scope_phase;
     uint8_t battery_blink_on;
     uint8_t menu_index;
@@ -168,6 +170,9 @@ typedef struct {
     uint8_t sleep_due;
     uint8_t dmm_render_pending;
     uint8_t screenshot_state;
+    uint8_t boot_export_state;
+    uint8_t boot_export_result;
+    uint8_t boot_export_percent;
 } ui_state_t;
 
 typedef struct {
@@ -478,8 +483,9 @@ enum {
     SCOPE_STUB_FRAME_MS = 90,
     DMM_FAST_RENDER_MS = 80,
     DMM_STATS_ZERO_RESET_SAMPLES = 8,
-    SETTINGS_ROW_COUNT = 5,
-    SETTINGS_SELECTABLE_COUNT = 4,
+    SETTINGS_ROW_COUNT = 6,
+    SETTINGS_SELECTABLE_COUNT = 5,
+    SETTINGS_BOOT_EXPORT_ROW = 4,
     SETTINGS_GRID_COLUMNS = 3,
     GEN_PREVIEW_CYCLES = 3,
     GEN_DEFERRED_APPLY_MS = 100,
@@ -688,7 +694,7 @@ static const uint8_t gen_wave_order[] = {
 };
 static const char *const gen_param_labels[] = {"WAVE", "FREQ", "DUTY", "AMP"};
 static const char *const menu_labels[] = {"MULTIMETER", "OSCILLOSCOPE", "SIGNAL GENERATOR", "SETTINGS"};
-static const char *const settings_row_labels[] = {"BEEP", "DISPLAY", "START", "SLEEP", "INFO"};
+static const char *const settings_row_labels[] = {"BEEP", "DISPLAY", "START", "SLEEP", "BOOTLOADER", "INFO"};
 static const char *const startup_labels[] = {"MENU", "DMM", "SCOPE", "GEN"};
 static const char *const beep_level_labels[] = {"OFF", "LOW", "MEDIUM", "HIGH", "MAX"};
 static const char *const brightness_level_labels[] = {"DIM", "LOW", "MEDIUM", "HIGH", "BRIGHT"};
@@ -7158,7 +7164,54 @@ static const char *settings_value_text(uint8_t row, char out[12]) {
         uint8_t sleep = ui_settings.sleep_enabled < SETTINGS_SLEEP_COUNT ? ui_settings.sleep_enabled : 0u;
         return sleep_labels[sleep];
     }
+    if (row == SETTINGS_BOOT_EXPORT_ROW) {
+        return "EXPORT";
+    }
     return FIRMWARE_VERSION_TEXT;
+}
+
+enum {
+    BOOT_EXPORT_UI_NONE,
+    BOOT_EXPORT_UI_CONFIRM,
+    BOOT_EXPORT_UI_SAVING,
+    BOOT_EXPORT_UI_RESULT,
+};
+
+static void draw_boot_export_overlay(void) {
+    static const char *const errors[] = {
+        "SAVED AND VERIFIED", "STORAGE BUSY - RETRY", "BOOTLOADER READ PROTECTED",
+        "INVALID BOOTLOADER VECTORS", "STORAGE WRITE ERROR",
+        "NOT ENOUGH FREE SPACE", "BACKUP VERIFY ERROR",
+    };
+    char percent[12];
+    if (ui.overlay != UI_OVERLAY_SETTINGS || ui.boot_export_state == BOOT_EXPORT_UI_NONE) {
+        return;
+    }
+    uint8_t error = ui.boot_export_state == BOOT_EXPORT_UI_RESULT &&
+        ui.boot_export_result != BOOT_EXPORT_OK;
+    uint16_t bg = error ? RGB565(64, 24, 28) : C_TEXT;
+    uint16_t fg = error ? C_TEXT : C_BG;
+    lcd_rect(22, 66, 276, 110, bg);
+    lcd_frame(22, 66, 276, 110, error ? C_WARN : C_PANEL_2);
+    lcd_text_center(22, 80, 276, "BOOTLOADER EXPORT", fg, bg, 2);
+    if (ui.boot_export_state == BOOT_EXPORT_UI_CONFIRM) {
+        lcd_text_center(22, 112, 276, "EJECT USB DRIVE FIRST", fg, bg, 1);
+        lcd_text_center(22, 126, 276, "REPLACES EXISTING BACKUP", fg, bg, 1);
+        lcd_text_center(22, 140, 276, "PLAY: EXPORT   MENU: CANCEL", fg, bg, 1);
+    } else if (ui.boot_export_state == BOOT_EXPORT_UI_SAVING) {
+        scope_format_u32(percent, ui.boot_export_percent);
+        ui_text_append(percent, "%", sizeof(percent));
+        lcd_text_center(22, 114, 276, percent, fg, bg, 2);
+        lcd_text_center(22, 145, 276, "READING AND VERIFYING", fg, bg, 1);
+    } else {
+        uint8_t result = ui.boot_export_result;
+        lcd_text_center(22, 115, 276,
+                        errors[result <= BOOT_EXPORT_VERIFY_ERROR ? result : BOOT_EXPORT_STORAGE_ERROR],
+                        fg, bg, 1);
+        if (!error) {
+            lcd_text_center(22, 143, 276, BOOTLOADER_FILE_NAME, fg, bg, 1);
+        }
+    }
 }
 
 static void draw_settings_tile(uint8_t row, uint16_t x, uint16_t y, uint16_t w, uint16_t h) {
@@ -7343,6 +7396,7 @@ static void ui_render_dispatch(void *ctx) {
         draw_settings_menu();
         draw_fw_update_overlay(C_BG);
         draw_screenshot_overlay(C_BG);
+        draw_boot_export_overlay();
         return;
     }
     if (current_render_job == UI_RENDER_MODE_CONTENT) {
@@ -9450,6 +9504,14 @@ static void settings_cycle_startup(int8_t dir) {
     ui_settings.startup_screen = value;
 }
 
+static void boot_export_progress(uint8_t percent) {
+    if (percent < 100u && percent < ui.boot_export_percent + 5u) {
+        return;
+    }
+    ui.boot_export_percent = percent;
+    ui_render();
+}
+
 static void settings_adjust_current(int8_t dir) {
     uint8_t changed = 1;
 
@@ -9568,6 +9630,8 @@ static void ui_handle_vertical_key(int8_t screen_dir, uint8_t repeat) {
 }
 
 static void ui_open_mode_menu_item(uint8_t index) {
+    ui.boot_export_state = BOOT_EXPORT_UI_NONE;
+    ui.boot_export_overlay_ms = 0;
     if (index > 3u) {
         index = 0;
     }
@@ -9635,6 +9699,26 @@ static void ui_handle_menu_keys(uint32_t events) {
         return;
     }
 
+    if (ui.boot_export_state == BOOT_EXPORT_UI_CONFIRM) {
+        if (events & KEY_REPEAT) {
+            return;
+        }
+        if (events & KEY_MENU) {
+            ui.boot_export_state = BOOT_EXPORT_UI_NONE;
+        } else if (events & KEY_OK) {
+            ui.boot_export_state = BOOT_EXPORT_UI_SAVING;
+            ui.boot_export_percent = 0;
+            ui_render();
+            ui.boot_export_result = usb_msc_export_bootloader(FIRMWARE_VERSION_TEXT, boot_export_progress);
+            ui.boot_export_state = BOOT_EXPORT_UI_RESULT;
+            ui.boot_export_overlay_ms = 6000;
+        }
+        ui_render();
+        return;
+    }
+    ui.boot_export_state = BOOT_EXPORT_UI_NONE;
+    ui.boot_export_overlay_ms = 0;
+
     if (events & KEY_MENU) {
         dmm_pause_for_menu_overlay();
         ui.overlay = UI_OVERLAY_MODE_MENU;
@@ -9664,7 +9748,13 @@ static void ui_handle_menu_keys(uint32_t events) {
         return;
     }
     if (events & (KEY_OK | KEY_AUTO)) {
-        settings_adjust_current(1);
+        if (ui.settings_row == SETTINGS_BOOT_EXPORT_ROW) {
+            if (events & KEY_OK) {
+                ui.boot_export_state = BOOT_EXPORT_UI_CONFIRM;
+            }
+        } else {
+            settings_adjust_current(1);
+        }
         ui_render();
         return;
     }
@@ -10056,6 +10146,11 @@ void ui_handle_keys(uint32_t events) {
     ui.sleep_due = 0;
 
     if (events == 0) return;
+
+    if (ui.overlay == UI_OVERLAY_SETTINGS && ui.boot_export_state == BOOT_EXPORT_UI_CONFIRM) {
+        ui_handle_menu_keys(events);
+        return;
+    }
 
     if (gen_sweep_menu_active && ui_handle_keys_gen_sweep_menu(events)) {
         return;
@@ -10524,6 +10619,17 @@ void ui_tick(uint32_t elapsed_ms) {
             rendered = 1;
         } else {
             ui.screenshot_overlay_ms = (uint16_t)(ui.screenshot_overlay_ms - elapsed_ms);
+        }
+    }
+
+    if (ui.boot_export_overlay_ms) {
+        if (elapsed_ms >= ui.boot_export_overlay_ms) {
+            ui.boot_export_overlay_ms = 0;
+            ui.boot_export_state = BOOT_EXPORT_UI_NONE;
+            ui_render();
+            rendered = 1;
+        } else {
+            ui.boot_export_overlay_ms = (uint16_t)(ui.boot_export_overlay_ms - elapsed_ms);
         }
     }
 
